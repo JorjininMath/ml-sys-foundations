@@ -1,0 +1,40 @@
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+
+# Test and tooling caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Build and packaging
+build/
+dist/
+*.egg-info/
+pip-wheel-metadata/
+
+# Notebook and Python env helpers
+.ipynb_checkpoints/
+.python-version
+
+# Environment files
+.env
+.env.*
+
+# macOS
+.DS_Store
+
+# IDE/editor files
+.vscode/
+.idea/
+
+# Local scratch / generated assets (exclude from first commit)
+test.py
+article_01_cover.png
