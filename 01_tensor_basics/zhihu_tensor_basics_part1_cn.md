@@ -1,118 +1,119 @@
 # 从 Shape 到 Stride：为什么转置后 Tensor 会变成 Non-Contiguous？
 
-很多人刚学 PyTorch 时，会把 Tensor 理解成"有 shape 的数组"。这个理解不算错，但不够完整。
+很多人学 PyTorch 时先记住了 `shape`，但一到 `view` 报错、`transpose` 结果奇怪，就会卡住。  
+问题通常不在 shape，而在 `stride`。
 
-真正决定 Tensor 很多行为差异的，往往是另一个属性：`stride`。
+这篇的目标是用可运行例子回答三个问题：
+
+1. stride 到底表示什么？
+2. 为什么 `transpose` 后常常 non-contiguous？
+3. 通用的索引偏移公式如何在 2D 和 3D 中工作？
 
 ---
 
-## 一、shape 和 stride 不是一回事
+## 一、先建立一个核心公式
 
-创建一个 2×3 的张量：
+对任意 N 维 tensor，元素在底层 storage 中的偏移量可以写成：
+
+```python
+offset = sum(index[i] * stride[i] for i in dims)
+```
+
+直觉上：
+
+- `shape` 说的是“张量看起来多大”
+- `stride` 说的是“某一维索引 +1 时，内存跳多少元素”
+
+---
+
+## 二、2D 例子：为什么 `stride=(4,1)` 很自然
+
+先构造一个连续的 `3x4` 张量：
 
 ```python
 import torch
 
-a = torch.arange(6).reshape(2, 3)
-print(a)
-# tensor([[0, 1, 2],
-#         [3, 4, 5]])
-
-print(a.shape)          # torch.Size([2, 3])
-print(a.stride())       # (3, 1)
-print(a.is_contiguous()) # True
+x = torch.arange(12).reshape(3, 4)
+print(x.shape)    # torch.Size([3, 4])
+print(x.stride()) # (4, 1)
 ```
 
-这里 `stride = (3, 1)` 的含义是：
+`stride=(4,1)` 的意思是：
 
-- 沿第 0 维（行）前进一步，内存要跳过 **3 个元素**
-- 沿第 1 维（列）前进一步，内存要跳过 **1 个元素**
+- 行索引 +1，要跳过 4 个元素
+- 列索引 +1，要跳过 1 个元素
 
-这和底层内存布局完全吻合：`[0, 1, 2, 3, 4, 5]` 是连续排列的。
+比如 `x[2,3]`：
 
-**`shape` 描述逻辑形状，`stride` 描述如何在内存里导航。**
+- offset = `2*4 + 3*1 = 11`
+- 正好对应最后一个元素 `11`
+
+这和连续内存 `[0,1,2,...,11]` 完全一致。
 
 ---
 
-## 二、转置只改 stride，不动内存
+## 三、transpose 为什么“改读法不改数据”
 
-对 `a` 做转置：
+现在做转置：
 
 ```python
-b = a.transpose(0, 1)
-print(b)
-# tensor([[0, 3],
-#         [1, 4],
-#         [2, 5]])
-
-print(b.shape)           # torch.Size([3, 2])
-print(b.stride())        # (1, 3)
-print(b.is_contiguous()) # False
+y = x.transpose(0, 1)
+print(y.shape)          # torch.Size([4, 3])
+print(y.stride())       # (1, 4)
+print(y.is_contiguous()) # False
 ```
 
-注意：**底层 storage 没有变**，`b` 和 `a` 共享同一块内存 `[0, 1, 2, 3, 4, 5]`。
+这里最关键的是：转置通常不会立刻重排底层数据。  
+它只是把 stride 从 `(4,1)` 变成 `(1,4)`，等于换了一套读取规则。
 
-PyTorch 只是把 stride 从 `(3, 1)` 改成了 `(1, 3)`，相当于换了一套"读取规则"：
+因此：
 
-```
-原始 a：stride = (3, 1)
-  a[0][0] → 内存位置 0
-  a[0][1] → 内存位置 1   （+1）
-  a[1][0] → 内存位置 3   （+3）
-
-转置 b：stride = (1, 3)
-  b[0][0] → 内存位置 0
-  b[1][0] → 内存位置 1   （+1）
-  b[0][1] → 内存位置 3   （+3）
-```
-
-读取 `b` 的同一行时，内存地址是跳跃的，不再连续 —— 这就是 `is_contiguous = False` 的原因。
+- 同一块 storage 被“重新解释”
+- 行/列访问会出现跳跃
+- 常见结果就是 `is_contiguous=False`
 
 ---
 
-## 三、`contiguous()` 做了什么
-
-调用 `contiguous()` 会真正复制数据，把元素重新排成连续内存：
+## 四、`contiguous()` 在这里做了什么
 
 ```python
-c = b.contiguous()
-print(c.stride())        # (2, 1)
-print(c.is_contiguous()) # True
-print(torch.equal(b, c)) # True，值相同，但底层 storage 不同
+z = y.contiguous()
+print(z.is_contiguous()) # True
 ```
 
-`b` 和 `c` 的值完全一样，但 `c` 拥有自己的独立内存，且布局是连续的。
+这一步会在需要时分配新内存并复制数据，把当前逻辑顺序真正排成连续布局。  
+所以 `y` 和 `z` 的值可以相同，但内存布局不同。
 
 ---
 
-## 四、为什么 `view` 会失败，`reshape` 却可能成功
+## 五、3D 例子：公式如何自然扩展
 
-`view` 要求 tensor 的内存必须是连续的，因为它本质上是在同一块内存上重新解释"形状"（零拷贝）。
-
-```python
-b.view(-1)    # RuntimeError: non-contiguous tensor 无法做零拷贝 view
-c.view(-1)    # OK：tensor([0, 3, 1, 4, 2, 5])
-```
-
-`reshape` 则更灵活 —— 如果内存连续，它等同于 `view`（零拷贝）；如果不连续，它会先复制再重排：
+同样的公式直接推广到 3D：
 
 ```python
-b.reshape(-1) # OK：内部会先 contiguous 再 view
+z3 = torch.arange(24).reshape(2, 3, 4)
+print(z3.shape)   # torch.Size([2, 3, 4])
+print(z3.stride()) # (12, 4, 1)
 ```
 
-一句话记住：
+对于 `z3[d,r,c]`，偏移公式就是：
 
-| 操作 | 要求 | 特点 |
-|------|------|------|
-| `view` | 必须 contiguous | 零拷贝，快 |
-| `reshape` | 无要求 | 必要时复制，更灵活 |
-| `contiguous()` | — | 强制整理成连续内存 |
+```python
+offset = d*12 + r*4 + c*1
+```
+
+比如 `z3[1,2,3]`：
+
+- offset = `1*12 + 2*4 + 3 = 23`
+- 正好对应最后一个元素
+
+这个例子很重要：它说明 stride 不是 2D 特例，而是 N 维通用规则。
 
 ---
 
-## 五、调试清单
+## 六、实战调试清单
 
-遇到 `RuntimeError: non-contiguous` 或布局相关报错时，先打印这四个属性：
+遇到布局相关问题（尤其 `view` 报错）时，先打印这几项：
 
 ```python
 print(tensor.shape)
@@ -121,24 +122,21 @@ print(tensor.is_contiguous())
 print(tensor.dtype, tensor.device)
 ```
 
-如果是 `view` 报错，标准修法：
-
-```python
-tensor = tensor.contiguous()
-tensor.view(...)  # 现在可以了
-```
+一句口诀：**先看 shape，再看 stride，再看 contiguous。**
 
 ---
 
 ## 总结
 
-1. **`shape`** 描述"看起来几行几列"，**`stride`** 描述"沿某一维走一步，内存要跳多少"。
-2. `transpose()` 只改 stride，不复制数据，结果通常是 non-contiguous。
-3. `view` 是零拷贝操作，依赖连续内存；`reshape` 在不连续时会自动复制。
-4. `contiguous()` 是显式触发内存整理的方式。
+1. `shape` 是逻辑结构，`stride` 是内存访问步长规则。  
+2. 通用访问公式是 `offset = sum(index[i] * stride[i])`。  
+3. `transpose` 常常只改 stride，不改底层 storage。  
+4. `contiguous()` 会在必要时复制并整理成连续内存。  
+5. stride 规则对 2D/3D/N 维都成立。
 
 ---
 
 ## 下一篇
 
-`view`、`reshape`、`permute` 三者的差异与拷贝行为，以及如何系统判断什么时候会触发内存复制。
+下一篇会专门讲 `view`、`reshape`、`permute` 的区别：  
+什么时候零拷贝，什么时候会复制，为什么同样改形状行为却不同。
